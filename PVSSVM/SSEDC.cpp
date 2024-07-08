@@ -91,7 +91,7 @@ void SSEDC_PubVer(g1_t pvk, BGN_CT *CT_V, BGN_CT *CT_O, BGN_PK &pk, BGN_SK &sk, 
     bn_set_dig(mod, 524287);
     lagrange_interpolate(phi, zero, index, V, mod, t);
     lagrange_interpolate(psi, zero, index, O, mod, t);
-    bn_print(phi);
+//    bn_print(phi);
 
     g1_t left_side, right_side;
     g1_new(left_side); g1_new(right_side);

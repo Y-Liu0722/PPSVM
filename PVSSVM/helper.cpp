@@ -18,16 +18,16 @@ void eval_at(bn_t v, const bn_t *poly, const bn_t x, const bn_t mod, size_t n){
 void make_random_shares(bn_t *shares, bn_t *x, const bn_t secret, const bn_t mod, int n, int t){
     bn_t *poly = RLC_ALLOCA(bn_t, t+1);
     bn_copy(poly[0], secret);
-    std::cout << "poly 0:";
-    bn_print(poly[0]);
+//    std::cout << "poly 0:";
+//    bn_print(poly[0]);
 //    bn_print(mod);
     bn_t mod_t;
     bn_copy(mod_t, mod);
 //    bn_print(mod_t);
     for (auto i = 1; i <= t; i++){
         bn_rand_mod(poly[i], mod_t);
-        std::cout << "poly " << i << ":";
-        bn_print(poly[i]);
+//        std::cout << "poly " << i << ":";
+//        bn_print(poly[i]);
     }
 
     bn_free(mod_t);

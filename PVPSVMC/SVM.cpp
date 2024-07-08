@@ -1,777 +1,654 @@
 #include "SVM.h"
 
-// read the model para from file and inputs
-void set_model_paras(ModelPara &modelPara, double gamma, double b, double c, std::string para_file) {
-    std::vector<std::vector<std::string>> para_data;
-
-    read_csv(para_data, para_file);
-    std::vector<std::vector<double>> f_data;
-    data_preprocess(f_data, para_data);
-    auto scale = pow(10, 15);
-    power(modelPara.scale, 10, 15);
-
-    Vec<Vec<ZZ>> ZZ_data;
-    f_data2ZZ(ZZ_data, f_data, scale);
-
-    for (auto r : ZZ_data){
-        modelPara.alpha.append(r[0]);
-        Vec<ZZ> tmp;
-        for (auto i = 1; i < r.length(); i++){
-            tmp.append(r[i]);
+vec_ZZ_p HomMVMult(int b, const EK &ek, const PKE_Para &pkePara, const Vec<MemoryV> &t_M, const Ciphertext &C_v, int m, int n) {
+    vec_ZZ_p u;
+    MemoryV t_P;
+    Vec<vec_ZZ_p> p_b;
+    vec_ZZ_p p;
+    u.SetLength(m);
+    p_b.SetLength(t_M.length());
+    for (auto i = 0; i < t_M.length(); i++){
+        BKS_Mult(t_P, b, ek.bksEk, pkePara, t_M[i], C_v);
+        {
+            // switch to mod r
+            ZZ_pPush push(pkePara.r_context);
+//            std::cout << BKS_Output(b, ek.bksEk, t_P, pkePara) << std::endl;
+            p_b[i] = Decode(pkePara, BKS_Output(b, ek.bksEk, t_P, pkePara));
+//            std::cout << "Decode time: " << time << std::endl;
+            p.append(p_b[i]);
         }
-        modelPara.sv.append(tmp);
     }
 
-    modelPara.gamma = ZZ(static_cast<long long>(std::round(scale * gamma)));
-    modelPara.b = ZZ(static_cast<long long>(std::round( scale * b)));
-    mul(modelPara.b, modelPara.b, power(modelPara.scale, 9));
-    modelPara.c = ZZ(static_cast<long long>(std::round(scale * c)));
-    mul(modelPara.c, modelPara.c, power(modelPara.scale, 2));
-    modelPara.SV = modelPara.sv.length();
-    modelPara.features = modelPara.sv[0].length();
+    ZZ_pPush push(pkePara.r_context);
+    for (auto i = 0; i < m; i++){
+        for (auto j = 0; j < n; j++){
+            u[i] += p[i * n + j];
+        }
+    }
+
+    return u;
 }
 
+void SVM_Gen(PubPara &para, PKE_PK &pk, EK &ek1, EK &ek2, PVK &pvk) {
+    BKS_Gen(ek1.bksEk, ek2.bksEk, pk, para.pkePara);
 
-// compute kernel functions
-// c^3 + 3c^2 \cdot \gamma \cdot \left(\sum_{i=1}^n x_{j,i} \cdot z_i\right) \\
-// + 3c\cdot \gamma^2 \cdot \left(\sum_{i=1}^n \sum_{u=1}^n x_{j,i} \cdot z_i \cdot x_{j,u} \cdot z_u\right) \\
-// + 3\gamma^3 \cdot \left(\sum_{i=1}^n \sum_{u=1}^n \sum_{k=1}^n  x_{j,i} \cdot z_j \cdot x_{j,u} \cdot z_u \cdot x_{j,k} \cdot z_k\right)
-void poly_kernel(REG &reg, int b, PVHSSPK pk, PVHSSEK ek,
-                 Vec<ZZ> ct_x, ZZ ct_ccc, ZZ ct_3ccg,
-                 ZZ ct_3cgg, ZZ ct_ggg, Vec<ZZ> ct_z,
-                 int &prf_key, std::ofstream &bench_time) {
-    // Precompute all x_i and x_i * x_j and x_i * x_j * x_k
-    Vec<REG> reg_x;
-    long features = ct_x.length();
-    reg_x.SetLength(features);
-    for (auto i = 0; i < features; i++){
-        if (ct_x[i] == 0){
-            reg_x[i].s = 0;
-            reg_x[i].s_ = 0;
-            continue;
-        }
-        PVHSS_Load(reg_x[i], b, pk, ek, ct_x[i], prf_key);
-    }
+//    std::cout << "Complete the BKS Key Gen." << std::endl;
 
-    Vec<Vec<REG>> reg_xx;
-    reg_xx.SetLength(features);
-    for (auto i = 0; i < features; i++){
-        reg_xx[i].SetLength(features);
-        for (auto j = 0; j < features; j++){
-            if (ct_x[i] == 0 || ct_x[j] == 0){
-                reg_xx[i][j].s = 0;
-                reg_xx[i][j].s_ = 0;
-                continue;
-            }
-            PVHSS_Mult(reg_xx[i][j], b, pk, ek, reg_x[i], ct_x[j], prf_key);
-        }
-    }
+    ZZ r;
+    ZZ r_;
 
-    Vec<Vec<REG>> reg_xz_xz;
-    reg_xz_xz.SetLength(features);
-    for (auto i = 0; i < features; i++){
-        reg_xz_xz[i].SetLength(features);
-    }
-
-    // PreCompute c^3
-    REG term1;
-    PVHSS_Load(term1, b, pk, ek, ct_ccc, prf_key); // c^3
-
-    // Start online computing
-    std::cout << "Start online computing" << std::endl;
-    double time = GetTime();
-
-    // 3c^2 \cdot \gamma \cdot \left(\sum_{i=1}^n x_{j,i} \cdot z_i\right)
-    REG term2;
-    for (auto i = 0; i < features; i++){
-        if ((reg_x[i].s == 0 && reg_x[i].s_ == 0) || ct_z[i] == 0){
-            continue;
-        }
-        REG tmp;
-        PVHSS_Mult(tmp, b, pk, ek, reg_x[i], ct_z[i], prf_key); // x_i * z_i
-        PVHSS_ADD(term2, b, pk, ek, term2, tmp, prf_key); // term2 += x_i * z_i
-    } // term2 = \sum x_i * z_i
-    if (term2.s == 0 && term2.s_ == 0){
-        PVHSS_ADD(reg, b, pk, ek, reg, term1, prf_key);
-        time = GetTime() - time;
-        std::cout << "All zero, early return" << std::endl;
-        std::cout << "Online computing time: " << time * 1000 << " ms" << std::endl;
-        bench_time << time * 1000 << std::endl;
-        return;
-    }
-
-    PVHSS_Mult(term2, b, pk, ek, term2, ct_3ccg, prf_key); // 3c^2 \cdot \gamma \cdot * (\sum x_i * z_i)
-
-    // 3c\cdot \gamma^2 \cdot \left(\sum_{i=1}^n \sum_{u=1}^n x_{j,i} \cdot z_i \cdot x_{j,u} \cdot z_u\right)
-    REG term3;
-    for (auto i = 0; i < features; i++){
-        if ((reg_xx[i][i].s == 0 && reg_xx[i][i].s_ == 0) || ct_z[i] == 0){
-            reg_xz_xz[i][i].s = 0;
-            reg_xz_xz[i][i].s_ = 0;
-            continue;
-        }
-        REG tmp;
-        PVHSS_Mult(tmp, b, pk, ek, reg_xx[i][i], ct_z[i], prf_key);// x_i * x_i * z_i
-        PVHSS_Mult(tmp, b, pk, ek, tmp, ct_z[i], prf_key);// x_i * z_i * x_i * z_i
-        reg_xz_xz[i][i] = tmp; // reg_xz_xz[i][i] = x_i * z_i * x_i * z_i
-        PVHSS_ADD(term3, b, pk, ek, term3, tmp, prf_key); // term3 += x_i * z_i * x_i * z_i
-    } // \sum x_i * z_i * x_j * z_j when i=j
-    for (auto i = 0; i <features; i++){
-        for (auto j = i + 1; j < features; j++){
-            if ((reg_xx[i][j].s == 0 && reg_xx[i][j].s_ == 0) || ct_z[i] == 0 || ct_z[j] == 0){
-                reg_xz_xz[i][j].s = 0;
-                reg_xz_xz[i][j].s_ = 0;
-                continue;
-            }
-            REG tmp;
-            PVHSS_Mult(tmp, b, pk, ek, reg_xx[i][j], ct_z[i], prf_key);// x_j * x_i * z_i
-            PVHSS_Mult(tmp, b, pk, ek, tmp, ct_z[j], prf_key);// x_j * z_j * x_i * z_i
-            reg_xz_xz[i][j] = tmp; // reg_xz_xz[i][i] = x_i * z_i * x_j * z_j
-            // each  x_j * z_j * x_i * z_i appear twice
-            PVHSS_cMult(tmp, b, pk, ek, tmp, 2, prf_key); // 2 * x_j * z_j * x_i * z_i
-            PVHSS_ADD(term3, b, pk, ek, term3, tmp, prf_key); // term3 += 2 * x_j * z_j * x_i * z_i
-        }
-    }// term3 = \sum x_i * z_i * x_j * z_j
-    PVHSS_Mult(term3, b, pk, ek, term3, ct_3cgg, prf_key); // 3c\cdot \gamma^2 * (\sum x_i * z_i * x_j * z_j)
-
-    // 3\gamma^3 \cdot \left(\sum_{i=1}^n \sum_{u=1}^n \sum_{k=1}^n  x_{j,i} \cdot z_j \cdot x_{j,u} \cdot z_u \cdot x_{j,k} \cdot z_k\right)
-    REG term4;
-    for (auto i = 0; i < features; i++){
-        if ((reg_xz_xz[i][i].s == 0 && reg_xz_xz[i][i].s_ == 0) || ct_x[i] == 0 || ct_z[i] == 0){
-            continue;
-        }
-        REG tmp;
-        PVHSS_Mult(tmp, b, pk, ek, reg_xz_xz[i][i], ct_z[i], prf_key);// x_i * x_i * z_i * z_i
-        PVHSS_Mult(tmp, b, pk, ek, tmp, ct_x[i], prf_key);// x_i * z_i * x_i * z_i * x_i * z_i
-        PVHSS_ADD(term4, b, pk, ek, term4, tmp, prf_key); // term4 += x_i * z_i * x_i * z_i * x_i * z_i
-    } // \sum x_i * z_i * x_j * z_j * x_k * z_k when i=j=k
-    for (auto i =0; i < features; i++){
-        for (auto j = i + 1; j < features; j++){
-            if ((reg_xz_xz[i][j].s == 0 && reg_xz_xz[i][j].s_ == 0) || ct_x[j] == 0 || ct_z[j] == 0){
-                continue;
-            }
-            REG tmp;
-            PVHSS_Mult(tmp, b, pk, ek, reg_xz_xz[i][i], ct_z[j], prf_key);// z_j * x_i * z_i * x_i * z_i
-            PVHSS_Mult(tmp, b, pk, ek, tmp, ct_x[j], prf_key);// x_j * z_j * x_i * z_i * x_i * z_i
-            // appear 3 times s.a. 112 121 211
-            PVHSS_cMult(tmp, b, pk, ek, tmp, 3, prf_key); // 3 * x_j * z_j * x_i * z_i * x_i * z_i
-            PVHSS_ADD(term4, b, pk, ek, term4, tmp, prf_key); // term4 += 3 * x_j * z_j * x_i * z_i * x_i * z_i
-
-            PVHSS_Mult(tmp, b, pk, ek, reg_xz_xz[j][j], ct_z[i], prf_key);// z_i * x_j * z_j * x_j * z_j
-            PVHSS_Mult(tmp, b, pk, ek, tmp, ct_x[i], prf_key);// x_i * z_i * x_j * z_j * x_j * z_j
-            // appear 3 times s.a. 221 212 122
-            PVHSS_cMult(tmp, b, pk, ek, tmp, 3, prf_key); // 3 * x_i * z_i * x_j * z_j * x_j * z_j
-            PVHSS_ADD(term4, b, pk, ek, term4, tmp, prf_key); // term4 += 3 * x_i * z_i * x_j * z_j * x_j * z_j
-        }
-    } // \sum x_i * z_i * x_j * z_j * x_k * z_k when i=j or i=k or j=k
-    for (auto i = 0; i < features; i++){
-        for (auto j = i + 1; j < features; j++){
-            for (auto k = j + 1; k < features; k++){
-                if ((reg_xz_xz[i][j].s == 0 && reg_xz_xz[i][j].s_ == 0) ||  ct_x[k] == 0 || ct_z[k] == 0){
-                    continue;
-                }
-                REG tmp;
-                PVHSS_Mult(tmp, b, pk, ek, reg_xz_xz[i][j], ct_z[k], prf_key);// z_k * x_j * z_j * x_i * z_i
-                PVHSS_Mult(tmp, b, pk, ek, tmp, ct_x[k], prf_key);// x_k * z_k * x_j * z_j * x_i * z_i
-                // appear 6 times s.a. 123 132 213 231 312 321
-                PVHSS_cMult(tmp, b, pk, ek, tmp, 6, prf_key); // 6 * x_j * z_j * x_i * z_i * x_i * z_i
-                PVHSS_ADD(term4, b, pk, ek, term4, tmp, prf_key); // term4 += 6 * x_j * z_j * x_i * z_i * x_i * z_i
-            }
-        }
-    }// \sum x_i * z_i * x_j * z_j * x_k * z_k
-    PVHSS_Mult(term4, b, pk, ek, term4, ct_ggg, prf_key); // gamma^3  * (\sum x_i * z_i * x_j * z_j)
-
-    // Add all terms together
-    PVHSS_ADD(reg, b, pk, ek, reg, term1, prf_key);
-    PVHSS_ADD(reg, b, pk, ek, reg, term2, prf_key);
-    PVHSS_ADD(reg, b, pk, ek, reg, term3, prf_key);
-    PVHSS_ADD(reg, b, pk, ek, reg, term4, prf_key);
-
-    time = GetTime() - time;
-    std::cout << "Online computing time: " << time * 1000 << " ms" << std::endl;
-    bench_time << time * 1000 << std::endl;
-}
-
-
-// compute SVM predict
-// y = \sum alpha_j * K(x_j, z) + b
-void predict(REG &reg, int b, PVHSSPK pk, PVHSSEK ek, int &prf_key,
-             Vec<Vec<ZZ>> ct_X, Vec<ZZ> ct_z, Vec<ZZ> ct_alpha,
-             ZZ ct_ccc, ZZ ct_3ccg, ZZ ct_3cgg, ZZ ct_ggg, ZZ ct_b) {
-    reg.s = 0;
-    reg.s_ = 0;
-    REG tmp;
-    std::ofstream bench_time ("../benchmark/poly_time_" + std::to_string(ct_z.length()) + "_" + std::to_string(b) + ".txt");
-    auto SV = ct_alpha.length();
-    for (auto i = 0; i < SV; i++){
-        std::cout << "SV: " << i << std::endl;
-        if (ct_alpha[i] == 0){
-            continue;
-        }
-        poly_kernel(tmp, b, pk, ek, ct_X[i], ct_ccc, ct_3ccg, ct_3cgg, ct_ggg, ct_z, prf_key, bench_time); // tmp = K(x, z)
-        PVHSS_Mult(tmp, b, pk, ek, tmp, ct_alpha[i], prf_key); // tmp = alpha_j * K(x_j, z)
-        PVHSS_ADD(reg, b, pk, ek, reg, tmp, prf_key); // reg += alpha_j * K(x_j, z)
-    }
-    tmp.s = 0;
-    tmp.s_ = 0;
-    PVHSS_Load(tmp, b, pk, ek, ct_b, prf_key);
-    PVHSS_ADD(reg, b, pk, ek, reg, tmp, prf_key); // reg = \sum alpha_j * K(x_j, z) + b
-    bench_time.close();
-}
-
-
-void get_user_inputs(Vec<Vec<ZZ>> &X, Vec<ZZ> &y, std::string in_file) {
-    std::vector<std::vector<std::string>> input_data;
-
-    read_csv(input_data, in_file);
-    std::vector<std::vector<double>> f_data;
-    data_preprocess(f_data, input_data);
-    auto scale = pow(10, 15);
-    Vec<Vec<ZZ>> ZZ_data;
-    f_data2ZZ(ZZ_data, f_data, scale);
-
-    for (auto r : ZZ_data){
-        y.append(r[0]);
-        Vec<ZZ> tmp;
-        for (auto i = 1; i < r.length(); i++){
-            tmp.append(r[i]);
-        }
-        X.append(tmp);
-    }
-}
-
-
-void eval_svm(std::string in_file, std::string para_file, double gamma, double b, double c){
-    int prf_key = 1;
-    //Phase 1: Get all inputs
-    ModelPara modelPara;
-    set_model_paras(modelPara, gamma, b, c, para_file);
-
-    std::cout << "SV: " << modelPara.SV << std::endl;
-    std::cout << "features: " << modelPara.features << std::endl;
-    std::cout << "gamma: " << modelPara.gamma << std::endl;
-    std::cout << "b: " << modelPara.b << std::endl;
-    std::cout << "c: " << modelPara.c << std::endl;
-
-    Vec<Vec<ZZ>> Z_test;
-    Vec<ZZ> y_test;
-    get_user_inputs(Z_test, y_test, in_file);
-
-    Vec<Vec<ZZ>> ct_X;
-    ct_X.SetLength(modelPara.SV);
-    for (auto i = 0; i < modelPara.SV; i++){
-        ct_X[i].SetLength(modelPara.features);
-    }
-    Vec<Vec<ZZ>> ct_Z;
-    ct_Z.SetLength(Z_test.length());
-    for (auto i = 0; i < Z_test.length(); i++){
-        ct_Z[i].SetLength(Z_test[0].length());
-    }
-    Vec<ZZ> ct_alpha;
-    ct_alpha.SetLength(modelPara.SV);
-    ZZ ct_c;
-    ZZ ct_gamma;
-    ZZ ct_b;
-
-
-
-    //Phase 2: Share (HSS_Enc) all inputs
-    PVHSSPK pk;
-    PVHSSEK ek0, ek1;
-    PVHSSPVK pvk;
-
-    PVHSS_Gen(pk, ek0, ek1, pvk);
-//    read_keys_from_file(pk, ek0, ek1, pvk);
-
-//    read_para_from_file(ct_X, ct_alpha, ct_c, ct_gamma, ct_b);
-
-    ZZ ct_ccc, ct_3ccg, ct_3cgg, ct_ggg;
-    PVHSS_Enc(ct_ccc, pk, modelPara.c * modelPara.c * modelPara.c);
-    PVHSS_Enc(ct_3ccg, pk, 3 * modelPara.c * modelPara.c * modelPara.gamma);
-    PVHSS_Enc(ct_3cgg, pk, 3 * modelPara.c *modelPara.gamma * modelPara.gamma);
-    PVHSS_Enc(ct_ggg, pk, modelPara.gamma * modelPara.gamma * modelPara.gamma);
-//    std::cout << ct_b << std::endl;
-//    std::cout << ct_c << std::endl;
-
-    // support vectors
-    std::ofstream sv_file("../data/ct_sv_"+ std::to_string(modelPara.features) +".txt");
-    if (!sv_file){
-        std::cerr << "Cannot open the ct_sv_"+ std::to_string(modelPara.features) +".txt file." << std::endl;
-        exit(1);
-    }
-    for (auto i = 0; i < modelPara.SV; i++){
-        std::cout << "Enc " << i << "th sv" << std::endl;
-        for (auto j = 0; j < modelPara.features; j++){
-//            std::cout << i << " " << j << std::endl;
-            if (modelPara.sv[i][j] == 0 ){
-                ct_X[i][j] = 0;
-                sv_file << ct_X[i][j] << " ";
-                continue;
-            }
-            PVHSS_Enc(ct_X[i][j], pk, modelPara.sv[i][j]);
-            sv_file << ct_X[i][j] << " ";
-        }
-        sv_file << std::endl;
-    }
-    sv_file.close();
-
-    // inputs
-    std::ofstream input_time("../benchmark/input_time_dp_"+ std::to_string(modelPara.features) +".txt");
-    if (!input_time) {
-        std::cerr << "Cannot open the input_time_"+ std::to_string(modelPara.features) +".txt file." << std::endl;
-        exit(1);
-    }
-    for (auto i = 0; i < Z_test.length(); i++){
-        auto time = GetTime();
-        for (auto j = 0; j < Z_test[0].length(); j++){
-            if (Z_test[i][j] == 0 ){
-                ct_Z[i][j] = 0;
-                continue;
-            }
-            PVHSS_Enc(ct_Z[i][j], pk, Z_test[i][j]);
-        }
-        time = GetTime() - time;
-        input_time << time * 1000 << std::endl;
-    }
-    input_time.close();
-
-    // alpha_j * y_j
-    std::ofstream alpha_file("../data/ct_alpha_"+ std::to_string(modelPara.features) +".txt");
-    if (!alpha_file){
-        std::cerr << "Cannot open the ct_alpha.txt file." << std::endl;
-        exit(1);
-    }
-    for (auto i = 0; i < modelPara.SV; i++){
-        if (modelPara.alpha[i] == 0 ){
-            ct_alpha[i] = 0;
-            alpha_file << ct_alpha[i] << std::endl;
-            continue;
-        }
-        PVHSS_Enc(ct_alpha[i], pk, modelPara.alpha[i]);
-        alpha_file << ct_alpha[i] << " ";
-    }
-    alpha_file << std::endl;
-    PVHSS_Enc(ct_c, pk, modelPara.c);
-    alpha_file << ct_c << std::endl;
-    PVHSS_Enc(ct_gamma, pk, modelPara.gamma);
-    alpha_file << ct_gamma << std::endl;
-    PVHSS_Enc(ct_b, pk, modelPara.b);
-    alpha_file << ct_b << std::endl;
-    alpha_file.close();
+//    GenGermainPrime(r, 3072);
+    r = conv<ZZ>("42865672803402392469208087890080561026811317745152730289594047845462967569415"
+                 "7674828456008147789655391216568967784547637513648556483025116956674453690415901"
+                 "0911518880273586983896001426533858413249502523635626303820137243885612640280451"
+                 "0057586615854068217862577095756234056971371545292003983646233796637548571023408"
+                 "4645611467640072786960231757938750507620841641951901599903058088523210916434047"
+                 "2652939331764346519853889743643993254625849578145672701128473372638831592592938"
+                 "4556584468336489462474598221704840124379808186285103767340511905891855355679953"
+                 "0640194732355189059074574407114729457247875683928981084217160937060021404284943"
+                 "8394509474331176473722225505793552075745858120223098556873263659900797013766243"
+                 "1684621646979901821356760154000986324685287980290257408756633297197123421381720"
+                 "3589497021548742986081673903491684278872270686278621918700762494954251941588367"
+                 "1947668542966362782220332615444132308131148146979535742191");
+    r_ = 2*r + 1;
 //
+//
+//    std::cout << r << std::endl;
+//    std::cout << r_ << std::endl;
 
+    ZZ g;
+//    ZZ h;
+//    do {
+//        RandomBnd(h, r_);
+//        PowerMod(g, h, 2, r_);
+//    } while (g == 1);
+//    std::cout << g << std::endl;
+//    std::cout << h << std::endl;
+//    ZZ t;
+//    PowerMod(t, g, r, r_);
+//    std::cout << t << std::endl;
 
-    Vec<ZZ> V;
-    V.SetLength(modelPara.SV);
+    g = conv<ZZ>("19058280161271858772252962237914698741920826123299786961480914111132670032494"
+                 "2885887018443151672176902040029652415475246969022490880264854766001262469438137"
+                 "8665958625810439324805043625732198261172044942926241746519761587203855908447486"
+                 "4613572176294694277726295707625133046769435392064112708332139069604125360902373"
+                 "6211778742727244545621001126418227523107147563419090342230175775734820046306889"
+                 "6401530503958447146581467785927621373689983779232783667462302546004317014087343"
+                 "5017067672914648002383688844581367081584205898216514684965181440079127763624345"
+                 "2799930518503071821874869016880898381110185534075331957205611706919659091219219"
+                 "1745310947729250858122640415414402910659805357943738128654318269399551264735108"
+                 "6230617333206277686781615854581769667622175363140346718592686700114671844183692"
+                 "7087787862490725466548841234399362625736644717061783984965055190085746688028200"
+                 "6795939730690931760052721568174553762330444231581320068924");
 
-/*    std::ofstream bench_time ("../benchmark/poly_time_test.txt");
-    for (auto i = 0; i < modelPara.SV; i++){
-        dot_prod_plaintext(V[i], modelPara.sv[i], Z_test[0]);
-        power(V[i], modelPara.gamma * V[i] + modelPara.c, 3);
-        std::cout << "True:" << V[i] <<std::endl;
-        REG tmp0, tmp1;
-        poly_kernel(tmp0, 0, pk, ek0, ct_X[i], ct_ccc, ct_3ccg, ct_3cgg, ct_ggg, ct_Z[0], prf_key, bench_time);
-        poly_kernel(tmp1, 1, pk, ek1, ct_X[i], ct_ccc, ct_3ccg, ct_3cgg, ct_ggg, ct_Z[0], prf_key, bench_time);
+    para.g = g;
+    para.r = r;
+    para.r_ = r_;
 
-        ZZ v, v0, v1;
-        ep_t g0_tau;
-        ep2_t g1_tau;
-        PVHSS_Output(v0, g0_tau, g1_tau, 0, pk, ek0, tmp0, prf_key);
-        PVHSS_Output(v1, g0_tau, g1_tau, 1, pk, ek1, tmp1, prf_key);
+//    std::cout << "Change mod" << std::endl;
 
-        auto pass = PVHSS_Ver(v, v0, v1, g0_tau, g1_tau, pk, pvk);
-        if (!pass){
-            return;
-        }
+    ZZ_p::init(para.pkePara.r);
+    ZZ_p alpha;
+    random(alpha);
+    PowerMod(pvk, para.g, rep(alpha), para.r_);
+
+    vec_ZZ_p vec_alpha;
+    vec_alpha.SetLength(para.pkePara.N, alpha);
+//    for (auto i = 0; i < para.pkePara.N; i++){
+//        conv(vec_alpha[i], alpha);
+//    }
+    ZZ_p::init(para.pkePara.q);
+
+    BKS_Enc(ek1.C_delta, para.pkePara, pk, Encode( para.pkePara, vec_alpha));
+    ek2.C_delta = ek1.C_delta;
+}
+
+void SVM_ModelEnc_basic(Vec<Ciphertext> &C, Ciphertext &C_d, Ciphertext &C_b, PubPara &para, const PKE_PK &pk,
+                        const ModelPara &modelPara) {
+    C.SetLength(modelPara.n_);
+    BKS_Enc(C_d, para.pkePara, pk, modelPara.hat_alpha);
+    BKS_Enc(C_b, para.pkePara, pk, modelPara.hat_b);
+
+    for (auto i = 0; i < modelPara.n_; i++) {
+        BKS_Enc(C[i], para.pkePara, pk, modelPara.hat_X[i]);
     }
-    bench_time.close();*/
+    para.m = modelPara.m;
+    para.n = modelPara.n;
+}
 
+void SVM_ModelEnc_improved(Vec<Ciphertext> &C, Ciphertext &C_d, Ciphertext &C_b, Ciphertext &C_g, Ciphertext &C_c,
+                            PubPara &para, const PKE_PK &pk, const ModelPara &modelPara) {
+    C.SetLength(modelPara.n_);
+    BKS_Enc(C_d, para.pkePara, pk, modelPara.hat_alpha);
+    BKS_Enc(C_b, para.pkePara, pk, modelPara.hat_b);
+    BKS_Enc(C_g, para.pkePara, pk, modelPara.hat_gamma);
+    BKS_Enc(C_c, para.pkePara, pk, modelPara.hat_c);
 
-/*
-    REG tmp0, tmp1;
-    poly_kernel(tmp0, 0, pk, ek0, ct_X[3], ct_ccc, ct_3ccg, ct_3cgg, ct_ggg, ct_Z[0], prf_key, bench_time);
-    poly_kernel(tmp1, 1, pk, ek1, ct_X[3], ct_ccc, ct_3ccg, ct_3cgg, ct_ggg, ct_Z[0], prf_key, bench_time);
-
-    ZZ v, v0, v1;
-    ep_t g0_tau;
-    ep2_t g1_tau;
-    PVHSS_Output(v0, g0_tau, g1_tau, 0, pk, ek0, tmp0, prf_key);
-    PVHSS_Output(v1, g0_tau, g1_tau, 1, pk, ek1, tmp1, prf_key);
-
-    auto pass = PVHSS_Ver(v, v0, v1, g0_tau, g1_tau, pk, pvk);
-    if (pass){
-        std::cout << v << std::endl;
-    }*/
-
-
-//    // compute all dot product for some z
-    Vec<ZZ> ct_V;
-
-    ct_V.SetLength(modelPara.SV);
-
-    std::ofstream ver_time("../benchmark/ver_time_"+ std::to_string(modelPara.features) +".txt");
-    std::ofstream dot_prod_time_0("../benchmark/dot_prod_time_0_"+ std::to_string(modelPara.features) +".txt");
-    std::ofstream dot_prod_time_1("../benchmark/dot_prod_time_1_"+ std::to_string(modelPara.features) +".txt");
-    // std::ofstream squared_euclidean_distance_time_0("../benchmark/squared_euclidean_distance_time_0_"+ std::to_string(modelPara.features) +".txt");
-    // std::ofstream squared_euclidean_distance_time_1("../benchmark/squared_euclidean_distance_time_1_"+ std::to_string(modelPara.features) +".txt");
-
-
-    if (!ver_time || !squared_euclidean_distance_time_0 || !squared_euclidean_distance_time_1){
-        std::cerr << "Cannot open the file." << std::endl;
-        exit(1);
+    for (auto i = 0; i < modelPara.n_; i++) {
+        BKS_Enc(C[i], para.pkePara, pk, modelPara.hat_X[i]);
     }
-    for (auto i = 0; i < modelPara.SV; i++){
-//        std::cout << "start " << i << std::endl;
-        REG tmp0, tmp1;
-        squared_euclidean_distance(tmp0, 0, pk, ek0, prf_key, ct_X[i], ct_Z[0], ct_Z[0], squared_euclidean_distance_time_0);
-        squared_euclidean_distance(tmp1, 1, pk, ek1, prf_key, ct_X[i], ct_Z[0], ct_Z[0], squared_euclidean_distance_time_1);
-//        dot_prod(tmp0, 0, pk, ek0, prf_key, ct_X[i], ct_Z[0], dot_prod_time_0);
-//        dot_prod(tmp1, 1, pk, ek1, prf_key, ct_X[i], ct_Z[0], dot_prod_time_1);
-//        std::cout << "end" << std::endl;
-        ZZ v, v0, v1;
-        ZZ g_tau0, g_tau1;
-        PVHSS_Output(v0, g_tau0, 0, pk, ek0, tmp0, prf_key);
-        PVHSS_Output(v1, g_tau1, 1, pk, ek1, tmp1, prf_key);
+    para.m = modelPara.m;
+    para.n = modelPara.n;
+}
 
-
-        auto time = GetTime();
-        auto pass = PVHSS_Ver(v, v0, v1, g_tau0, g_tau1, pk, pvk);
-        time = GetTime() - time;
-        ver_time << time * 1000 << std::endl;
-        if (!pass){
-            exit(1);
-        }
-        // Send v to user to compute poly kernel
-        power(v, modelPara.gamma * v + modelPara.c, 3);
-//        std::cout << "After power: " << v << std::endl;
-        PVHSS_Enc(ct_V[i], pk, v);
-//        dot_prod_plaintext(V[i], modelPara.sv[i], Z_test[0]);
-//        power(V[i], modelPara.gamma * V[i] + modelPara.c, 3);
-//        std::cout << "Plaintext after power: " << V[i] << std::endl;
-    }
-
-
-    std::cout << "start" << std::endl;
-    REG tmp0, tmp1;
-//    dot_prod(tmp0, 0, pk, ek0, prf_key, ct_V, ct_alpha, dot_prod_time_0);
-//    dot_prod(tmp1, 1, pk, ek1, prf_key, ct_V, ct_alpha, dot_prod_time_1);
-    // add b
-    REG tmp0_b, tmp1_b;
-    PVHSS_Load(tmp0_b, 0, pk, ek0, ct_b, prf_key);
-    PVHSS_Load(tmp1_b, 1, pk, ek1, ct_b, prf_key);
-    PVHSS_ADD(tmp0, 0, pk, ek0, tmp0, tmp0_b, prf_key);
-    PVHSS_ADD(tmp1, 1, pk, ek1, tmp1, tmp1_b, prf_key);
-    std::cout << "end" << std::endl;
-    ZZ v, v0, v1;
-    ZZ g_tau0, g_tau1;
-    PVHSS_Output(v0, g_tau0, 0, pk, ek0, tmp0, prf_key);
-    PVHSS_Output(v1, g_tau1, 1, pk, ek1, tmp1, prf_key);
-
+// compute protocol of basic scheme
+void Compute_basic_poly(ZZ_p &y_1, ZZ_p &y_2, ZZ &g_phi_1, ZZ &g_phi_2, const EK &ek1, const EK &ek2, const PubPara &para,
+                    const Vec<Ciphertext> &C, const Ciphertext &C_d, const Ciphertext &C_b, const ZZ_p &gamma,
+                    const ZZ_p &c, const ZZ &p, const PKE_PK &pk, const PVK &pvk, const vec_ZZ_p &z,
+                    std::vector<double> &Time) { // user inputs
+    // Offline
+    Vec<MemoryV> t_X_1, t_X_2;
+    Vec<MemoryV> t_X_delta_1, t_X_delta_2;
+    MemoryV t_b_1, t_b_2, t_d_1, t_d_2;
+    t_X_1.SetLength(C.length());
+    t_X_delta_1.SetLength(C.length());
+    t_X_2.SetLength(C.length());
+    t_X_delta_2.SetLength(C.length());
+    // Server 1
     auto time = GetTime();
-    auto pass = PVHSS_Ver(v, v0, v1, g_tau0, g_tau1, pk, pvk);
-    time = GetTime() - time;
-    ver_time << time * 1000 << std::endl;
-
-    ver_time.close();
-//    dot_prod_time_0.close();
-//    dot_prod_time_1.close();
-    if (!pass){
-//        exit(1);
+    for (auto i = 0; i < C.length(); i++){
+        BKS_Load(t_X_1[i], 1, ek1.bksEk, para.pkePara, C[i]);
+        BKS_Mult(t_X_delta_1[i], 1, ek1.bksEk, para.pkePara, t_X_1[i], ek1.C_delta);
     }
+    BKS_Load(t_d_1, 1, ek1.bksEk, para.pkePara, C_d);
+    BKS_Load(t_b_1, 1, ek1.bksEk, para.pkePara, C_b);
+    Time[0] = GetTime() - time;
+//    std::cout << "Server 1 offline time: " << Time[0] << std::endl;
 
-    ZZ res;
-    dot_prod_plaintext(res, V, modelPara.alpha);
-    res += modelPara.b;
-    std::cout << res << std::endl;
+    // Server 2
+    time = GetTime();
+    for (auto i = 0; i < C.length(); i++){
+        BKS_Load(t_X_2[i], 2, ek2.bksEk, para.pkePara, C[i]);
+        BKS_Mult(t_X_delta_2[i], 2, ek2.bksEk, para.pkePara, t_X_2[i], ek2.C_delta);
+    }
+    BKS_Load(t_d_2, 2, ek2.bksEk, para.pkePara, C_d);
+    BKS_Load(t_b_2, 2, ek2.bksEk, para.pkePara, C_b);
+    Time[1] = GetTime() - time;
+//    std::cout << "Server 2 offline time: " << Time[1] << std::endl;
+
+    // Online
+    // User input
+    vec_ZZ_p z_; // length N
+    for (auto i = 0 ; i < para.pkePara.N / z.length(); i++){
+        z_.append(z);
+    }
+    auto hat_z = Encode(para.pkePara, z_);
+    time = GetTime();
+    Ciphertext C_z;
+    BKS_Enc(C_z, para.pkePara, pk, hat_z);
+    Time[4] = GetTime() - time;
+//    std::cout << "User enc time: " << Time[4] << std::endl;
+
+    // Sending C_z to server
+
+    // Server 1 compute
+    time = GetTime();
+    vec_ZZ_p u_1 = HomMVMult(1, ek1, para.pkePara, t_X_1, C_z, para.m, para.n);
+    vec_ZZ_p tau_1 = HomMVMult(1, ek1, para.pkePara, t_X_delta_1, C_z, para.m, para.n);
+    vec_ZZ g_tau_1;
+    g_tau_1.SetLength(para.m);
+    for (auto i = 0; i < para.m; i++){
+        PowerMod(g_tau_1[i], para.g, rep(tau_1[i]), para.r_);
+    }
+    Time[2] = GetTime() - time;
+
+    // Server 2 compute
+    time = GetTime();
+    vec_ZZ_p u_2 = HomMVMult(2, ek2, para.pkePara, t_X_2, C_z, para.m, para.n);
+    vec_ZZ_p tau_2 = HomMVMult(2, ek2, para.pkePara, t_X_delta_2, C_z, para.m, para.n);
+
+    vec_ZZ g_tau_2;
+    g_tau_2.SetLength(para.m);
+    for (auto i = 0; i < para.m; i++){
+        PowerMod(g_tau_2[i], para.g, rep(tau_2[i]), para.r_);
+    }
+    Time[3] = GetTime() - time;
+
+    // Sending u and tau to the user
+    // User check
+    vec_ZZ_p k;
+    {
+        ZZ_pPush push(para.pkePara.r_context);
+        ZZ left, right, t_right;
+        right = 1;
+        ZZ_p sum_u;
+        for (auto i = 0; i < para.m; i++) {
+            sum_u += u_1[i] + u_2[i];
+            MulMod(t_right, g_tau_1[i], g_tau_2[i], para.r_);
+            MulMod(right, right, t_right, para.r_);
+        }
+        PowerMod(left, pvk, rep(sum_u), para.r_);
+
+        if (left != right) {
+//            std::cout << "Error when checking u" << std::endl;
+        }
+
+        // User compute kernel function
+        time = GetTime();
+        k.SetLength(para.m);
+        for (auto i = 0; i < para.m; i++) {
+            k[i] = gamma * (u_1[i] + u_2[i]) + c;
+            power(k[i], k[i], p);
+        }
+        Time[5] = GetTime() - time;
+    }
+    Ciphertext C_k;
+    time = GetTime();
+    auto hat_k = Encode(para.pkePara, k);
+    BKS_Enc(C_k, para.pkePara, pk, hat_k);
+    Time[5] += GetTime() - time;
+
+    // Sending C_k to servers
+    MemoryV t_kd_1, t_kd_2, t_y_1, t_y_2, t_phi_1, t_phi_2;
+    // Server 1 compute
+    time = GetTime();
+    BKS_Mult(t_kd_1, 1, ek1.bksEk, para.pkePara, t_d_1, C_k);
+    BKS_ADD1(t_y_1, 1, ek1.bksEk, t_kd_1, t_b_1);
+    BKS_Mult(t_phi_1, 1, ek1.bksEk, para.pkePara, t_y_1, ek1.C_delta);
+
+    vec_ZZ_p y_vec_1 = Decode(para.pkePara, BKS_Output(1, ek1.bksEk, t_y_1, para.pkePara));
+    vec_ZZ_p phi_vec_1 = Decode(para.pkePara, BKS_Output(1, ek1.bksEk, t_phi_1, para.pkePara));
+    {
+        ZZ_pPush push(para.pkePara.r_context);
+        for (auto i = 0; i < para.m; i++) {
+            y_1 += y_vec_1[i];
+            g_phi_1 += rep(phi_vec_1[i]);
+        }
+        PowerMod(g_phi_1, para.g, g_phi_1, para.r_);
+    }
+    Time[2] += GetTime() - time;
+//    std::cout << "Server 1 compute time: " << Time[2] << std::endl;
+
+    // Server 2 compute
+    time = GetTime();
+    BKS_Mult(t_kd_2, 2, ek2.bksEk, para.pkePara, t_d_2, C_k);
+    BKS_ADD1(t_y_2, 2, ek2.bksEk, t_kd_2, t_b_2);
+    BKS_Mult(t_phi_2, 2, ek2.bksEk, para.pkePara, t_y_2, ek2.C_delta);
+
+    vec_ZZ_p y_vec_2 = Decode(para.pkePara, BKS_Output(2, ek2.bksEk, t_y_2, para.pkePara));
+    vec_ZZ_p phi_vec_2 = Decode(para.pkePara, BKS_Output(2, ek2.bksEk, t_phi_2, para.pkePara));
+    {
+        ZZ_pPush push(para.pkePara.r_context);
+        for (auto i = 0; i < para.m; i++) {
+            y_2 += y_vec_2[i];
+            g_phi_2 += rep(phi_vec_2[i]);
+        }
+        PowerMod(g_phi_2, para.g, g_phi_2, para.r_);
+    }
+    Time[3] += GetTime() - time;
+//    std::cout << "Server 2 compute time: " << Time[3] << std::endl;
 }
 
-void dot_prod(REG &reg, int b, PVHSSPK pk, PVHSSEK ek, int &prf_key, Vec<ZZ> ct_x, Vec<ZZ> ct_z, std::ofstream &dot_prod_time) {
-    Vec<REG> reg_x;
-    reg_x.SetLength(ct_x.length());
-    for (auto i = 0; i < ct_x.length(); i++) {
-        if (ct_x[i] == 0){
-            reg_x[i].s = 0;
-            reg_x[i].s_ = 0;
-            continue;
-        }
-        PVHSS_Load(reg_x[i], b, pk, ek, ct_x[i], prf_key);
+void Compute_basic_rbf(ZZ_p& y_1, ZZ_p& y_2, ZZ &g_phi_1, ZZ &g_phi_2, const EK &ek1, const EK &ek2, const PubPara &para,
+                        const Vec<Ciphertext> &C, const Ciphertext& C_d, const Ciphertext &C_b, const ZZ_p& gamma, // server inputs
+                        const PKE_PK& pk, const PVK& pvk, const vec_ZZ_p& z,
+                        std::vector<double> &Time) {
+    // Offline
+    Vec<MemoryV> t_X_1, t_X_2;
+    Vec<MemoryV> t_XX_1, t_XX_2;
+    Vec<MemoryV> t_X_delta_1, t_X_delta_2;
+    Vec<MemoryV> t_XX_delta_1, t_XX_delta_2;
+    MemoryV t_b_1, t_b_2, t_d_1, t_d_2;
+    t_X_1.SetLength(C.length());
+    t_X_delta_1.SetLength(C.length());
+    t_X_2.SetLength(C.length());
+    t_X_delta_2.SetLength(C.length());
+    t_XX_1.SetLength(C.length());
+    t_XX_delta_1.SetLength(C.length());
+    t_XX_2.SetLength(C.length());
+    t_XX_delta_2.SetLength(C.length());
+
+    vec_ZZ_p h_1, h_2, eta_1, eta_2;
+    vec_ZZ_p H_1, H_2, Eta_1, Eta_2;
+    vec_ZZ_p h_i_1, h_i_2, eta_i_1, eta_i_2;
+    H_1.SetLength(para.m);
+    H_2.SetLength(para.m);
+    Eta_1.SetLength(para.m);
+    Eta_2.SetLength(para.m);
+    auto dec_1 = 0.0;
+    auto dec = 0.0;
+    // Server 1
+    auto time = GetTime();
+    for (auto i = 0; i < C.length(); i++){
+        BKS_Load(t_X_1[i], 1, ek1.bksEk, para.pkePara, C[i]);
+        BKS_Mult(t_X_delta_1[i], 1, ek1.bksEk, para.pkePara, t_X_1[i], ek1.C_delta);
+        BKS_Mult(t_XX_1[i], 1, ek1.bksEk, para.pkePara, t_X_1[i], C[i]);
+        BKS_Mult(t_XX_delta_1[i], 1, ek1.bksEk, para.pkePara, t_X_delta_1[i], C[i]);
+        dec = GetTime();
+        h_i_1 = Decode(para.pkePara, BKS_Output(1, ek1.bksEk, t_XX_1[i], para.pkePara));
+        eta_i_1 = Decode(para.pkePara, BKS_Output(1, ek1.bksEk, t_XX_delta_1[i], para.pkePara));
+        dec_1 += GetTime() - dec;
+        h_1.append(h_i_1);
+        eta_1.append(eta_i_1);
     }
-    REG tmp;
-    std::cout << "Start online computing" << std::endl;
-    double time = GetTime();
-    for (auto i = 0; i < ct_x.length(); i++){
-        if (ct_x[i] == 0 || ct_z[i] == 0){
-            continue;
-        }
-        PVHSS_Mult(tmp, b, pk, ek, reg_x[i], ct_z[i], prf_key);
-        PVHSS_ADD(reg, b, pk, ek, reg, tmp, prf_key);
-    }
-    time = GetTime() - time;
-    dot_prod_time << time * 1000 << std::endl;
-    std::cout << "Online computing time: " << time * 1000 << " ms" << std::endl;
-}
-
-void squared_euclidean_distance(REG &reg, int b, PVHSSPK pk, PVHSSEK ek, int &prf_key, Vec<ZZ> ct_x, Vec<ZZ> ct_z, Vec<ZZ> ct_zz, std::ofstream &squared_euclidean_distance_time){
-    Vec<REG> reg_x;
-    reg_x.SetLength(ct_x.length());
-    for (auto i = 0; i < ct_x.length(); i++) {
-        if (ct_x[i] == 0){
-            reg_x[i].s = 0;
-            reg_x[i].s_ = 0;
-            continue;
-        }
-        PVHSS_Load(reg_x[i], b, pk, ek, ct_x[i], prf_key);
-    }
-
-    REG reg_xx;
-    reg_xx.s = 0;
-    reg_xx.s_ = 0;
-    for (auto i = 0; i < ct_x.length(); i++){
-        if (ct_x[i] == 0){
-            continue;
-        }
-        REG tmp;
-        PVHSS_Mult(tmp, b, pk, ek, reg_x[i], ct_x[i], prf_key);
-        PVHSS_ADD(reg_xx, b, pk, ek, reg_xx, tmp, prf_key);
-    }
-
-    // Start online computing
-    double time = GetTime();
-    REG reg_xz;
-    reg_xz.s = 0;
-    reg_xz.s_ = 0;
-    for (auto i = 0; i < ct_x.length(); i++){
-        if (ct_x[i] == 0 || ct_z[i] == 0){
-            continue;
-        }
-        REG tmp;
-        PVHSS_Mult(tmp, b, pk, ek, reg_x[i], ct_z[i], prf_key);
-        PVHSS_ADD(reg_xz, b, pk, ek, reg_xz, tmp, prf_key);
-    }
-
-    Vec<REG> reg_z;
-    reg_z.SetLength(ct_z.length());
-    for (auto i = 0; i < ct_z.length(); i++) {
-        if (ct_z[i] == 0){
-            reg_z[i].s = 0;
-            reg_z[i].s_ = 0;
-            continue;
-        }
-        PVHSS_Load(reg_z[i], b, pk, ek, ct_z[i], prf_key);
-    }
-
-    REG reg_zz;
-    reg_zz.s = 0;
-    reg_zz.s_ = 0;
-    for (auto i = 0; i < ct_z.length(); i++){
-        if (ct_zz[i] == 0){
-            continue;
-        }
-        PVHSS_Load(reg_zz, b, pk, ek, ct_zz[i], prf_key);
-//        REG tmp;
-//        PVHSS_Mult(tmp, b, pk, ek, reg_z[i], ct_z[i], prf_key);
-//        PVHSS_ADD(reg_zz, b, pk, ek, reg_zz, tmp, prf_key);
-    }
-
-    PVHSS_ADD(reg, b, pk, ek, reg_xx, reg_zz, prf_key);
-    reg_xz.s = -2 * reg_xz.s;
-    reg_xz.s_ = -2 * reg_xz.s_;
-    PVHSS_ADD(reg, b, pk, ek, reg, reg_xz, prf_key);
-
-    time = GetTime() - time;
-    squared_euclidean_distance_time << time * 1000 << std::endl;
-    std::cout << "Online computing time: " << time * 1000 << " ms" << std::endl;
-}
-
-
-void test_input_dp_time(std::string in_file, std::string type, int features){
-    //Phase 1: Get all inputs
-    Vec<Vec<ZZ>> Z_test;
-    Vec<ZZ> y_test;
-    get_user_inputs(Z_test, y_test, in_file);
-
-    Vec<Vec<ZZ>> ct_Z;
-    ct_Z.SetLength(Z_test.length());
-    for (auto i = 0; i < Z_test.length(); i++){
-        ct_Z[i].SetLength(Z_test[0].length());
-    }
-
-
-    //Phase 2: Share (HSS_Enc) all inputs
-    PVHSSPK pk;
-    PVHSSEK ek0, ek1;
-    PVHSSPVK pvk;
-
-    PVHSS_Gen(pk, ek0, ek1, pvk);
-
-
-    // inputs
-    std::ofstream input_time("../benchmark/input_time_"+ type +"_"+ std::to_string(features) +".txt");
-    if (!input_time) {
-        std::cerr << "Cannot open the input_time_"+ std::to_string(features) +".txt file." << std::endl;
-        exit(1);
-    }
-    for (auto i = 0; i < Z_test.length(); i++){
-        auto time = GetTime();
-        for (auto j = 0; j < Z_test[0].length(); j++){
-            if (Z_test[i][j] == 0 ){
-                ct_Z[i][j] = 0;
-                continue;
-            }
-            PVHSS_Enc(ct_Z[i][j], pk, Z_test[i][j]);
-        }
-        time = GetTime() - time;
-        input_time << time * 1000 << std::endl;
-    }
-    input_time.close();
-}
-
-void test_input_sv_time(std::string para_file, std::string type, int features){
-    //Phase 1: Get all inputs
-    ModelPara modelPara;
-    set_model_paras(modelPara, 1, 1, 1, para_file);
-
-
-
-    Vec<Vec<ZZ>> ct_X;
-    ct_X.SetLength(modelPara.SV);
-    for (auto i = 0; i < modelPara.SV; i++){
-        ct_X[i].SetLength(modelPara.features);
-    }
-
-    Vec<ZZ> ct_alpha;
-    ct_alpha.SetLength(modelPara.SV);
-    ZZ ct_c;
-    ZZ ct_gamma;
-    ZZ ct_b;
-
-
-
-    //Phase 2: Share (HSS_Enc) all inputs
-    PVHSSPK pk;
-    PVHSSEK ek0, ek1;
-    PVHSSPVK pvk;
-
-    PVHSS_Gen(pk, ek0, ek1, pvk);
-
-
-    // support vectors
-    std::ofstream input_sv_time("../benchmark/input_time_sv_"+type+"_"+ std::to_string(modelPara.features) +".txt");
-    if (!input_sv_time) {
-        std::cerr << "Cannot open the input_time_"+ std::to_string(modelPara.features) +".txt file." << std::endl;
-        exit(1);
-    }
-    for (auto i = 0; i < modelPara.SV; i++){
-        std::cout << "Enc " << i << "th sv" << std::endl;
-        auto time = GetTime();
-        for (auto j = 0; j < modelPara.features; j++){
-            if (modelPara.sv[i][j] == 0 ){
-                ct_X[i][j] = 0;
-                continue;
-            }
-            PVHSS_Enc(ct_X[i][j], pk, modelPara.sv[i][j]);
-        }
-        time = GetTime() - time;
-        input_sv_time << time * 1000 << std::endl;
-    }
-}
-
-void test_batch_verify(int size){
-    //Phase 2: Share (HSS_Enc) all inputs
-    PVHSSPK pk;
-    PVHSSEK ek0, ek1;
-    PVHSSPVK pvk;
-
-    PVHSS_Gen(pk, ek0, ek1, pvk);
-
-    std::ofstream verify_time("../benchmark/verify_time_size_"+ std::to_string(size) + ".txt");
-    for (auto k = 0; k < 200; k++){
-        ZZ V, v, v0, v1;
-        ZZ Tau, tau, tau0, tau1;
-        RandomBnd(v0, pk.DJpk1.N);
-        RandomBnd(v1, pk.DJpk1.N);
-        RandomBnd(tau1, pk.DJpk1.N);
-        RandomBnd(tau0, pk.DJpk1.N);
-
-        auto time = GetTime();
-        for (auto i = 0; i < size; i++){ // number of intervals
-            v = v1- v0;
-            tau = tau1 - tau0;
-            V += v;
-            Tau += tau;
-        }
-
-
-        ZZ left, right;
-        left = PowerMod(pk.g, Tau, pk.r_);
-        right = PowerMod(pvk, V, pk.r_);
-        if (left != right){
-            std::cout << "Fail" << std::endl;
-        } else {
-            std::cout << "Pass" << std::endl;
-        }
-        time = GetTime() - time;
-        verify_time << time * 1000 << std::endl;
-    }
-
-}
-
-void test_verify(int size){
-    PVHSSPK pk;
-    PVHSSEK ek0, ek1;
-    PVHSSPVK pvk;
-
-    PVHSS_Gen(pk, ek0, ek1, pvk);
-
-    std::ofstream verify_time("../benchmark/verify_time_poly_size_"+ std::to_string(size) + ".txt");
-    for (auto i = 0; i < 200; i++){
-        ZZ v, v0, v1;
-        ZZ tau, tau0, tau1;
-        RandomBnd(v0, pk.DJpk1.N);
-        RandomBnd(v1, pk.DJpk1.N);
-        RandomBnd(tau1, pk.DJpk1.N);
-        RandomBnd(tau0, pk.DJpk1.N);
-
-        auto time = GetTime();
-        v = v1 - v0;
-        tau = tau1 - tau0;
-
-        ZZ left, right;
-        left = PowerMod(pk.g, tau, pk.r_);
-        right = PowerMod(pvk, v, pk.r_);
-        if (left != right){
-            std::cout << "Fail" << std::endl;
-        } else {
-            std::cout << "Pass" << std::endl;
-        }
-        time = GetTime() - time;
-        verify_time << time * 1000 << std::endl;
-    }
-}
-
-void test_input_size(){
-    //Phase 1: Get all inputs
-    Vec<Vec<ZZ>> Z_test;
-    Vec<ZZ> y_test;
-    get_user_inputs(Z_test, y_test, "../data/SMS_test_data_1000.csv");
-
-    auto count = 0;
-    for (auto i = 0; i < Z_test.length(); i++){
-        for (auto j = 0; j < Z_test[0].length(); j++){
-            if (Z_test[i][j] != 0){
-                count ++;
+    {
+        ZZ_pPush push(para.pkePara.r_context);
+        for (auto j = 0; j < para.m; j++) {
+            for (auto i = 0; i < para.n; i++) {
+                H_1[j] += h_1[j * para.n + i];
+                Eta_1[j] += eta_1[j * para.n + i];
             }
         }
+    }
+    BKS_Load(t_d_1, 1, ek1.bksEk, para.pkePara, C_d);
+    BKS_Load(t_b_1, 1, ek1.bksEk, para.pkePara, C_b);
+    Time[0] = GetTime() - time - dec_1;
 
-        if ((i + 1)%200 == 0){
-            std::cout << "Size: " << i + 1 << " -- " << count << std::endl;
+
+    // Server 2
+    auto dec_2 = 0.0;
+    time = GetTime();
+    for (auto i = 0; i < C.length(); i++){
+        BKS_Load(t_X_2[i], 2, ek2.bksEk, para.pkePara, C[i]);
+        BKS_Mult(t_X_delta_2[i], 2, ek2.bksEk, para.pkePara, t_X_2[i], ek2.C_delta);
+        BKS_Mult(t_XX_2[i], 2, ek2.bksEk, para.pkePara, t_X_2[i], C[i]);
+        BKS_Mult(t_XX_delta_2[i], 2, ek2.bksEk, para.pkePara, t_X_delta_2[i], C[i]);
+        dec = GetTime();
+        h_i_2 = Decode(para.pkePara, BKS_Output(2, ek2.bksEk, t_XX_2[i], para.pkePara));
+        eta_i_2 = Decode(para.pkePara, BKS_Output(2, ek2.bksEk, t_XX_delta_2[i], para.pkePara));
+        dec_2 += GetTime() - dec;
+        h_2.append(h_i_2);
+        eta_2.append(eta_i_2);
+    }
+    for (auto j = 0; j < para.m; j++){
+        for (auto i = 0; i < para.n; i++){
+            H_2[j] += h_2[j * para.n + i];
+            Eta_2[j] += eta_2[j * para.n + i];
+        }
+    }
+    BKS_Load(t_d_2, 2, ek2.bksEk, para.pkePara, C_d);
+    BKS_Load(t_b_2, 2, ek2.bksEk, para.pkePara, C_b);
+    Time[1] = GetTime() - time - dec_2;
+
+    // Online
+    // Online
+    // User input
+    vec_ZZ_p z_; // length N
+    for (auto i = 0 ; i < para.pkePara.N / z.length(); i++){
+        z_.append(z);
+    }
+    auto hat_z = Encode(para.pkePara, z_);
+    time = GetTime();
+    Ciphertext C_z;
+    BKS_Enc(C_z, para.pkePara, pk, hat_z);
+    Time[4] = GetTime() - time;
+
+    // Sending C_z to server
+
+    // Server 1 compute
+    time = GetTime();
+    vec_ZZ_p u_1 = HomMVMult(1, ek1, para.pkePara, t_X_1, C_z, para.m, para.n);
+    vec_ZZ_p tau_1 = HomMVMult(1, ek1, para.pkePara, t_X_delta_1, C_z, para.m, para.n);
+    vec_ZZ g_tau_1;
+    g_tau_1.SetLength(para.m);
+    for (auto i = 0; i < para.m; i++){
+        u_1[i] = H_1[i] - 2 * u_1[i];
+        tau_1[i] = Eta_1[i] - 2 * tau_1[i];
+        PowerMod(g_tau_1[i], para.g, rep(tau_1[i]), para.r_);
+    }
+    Time[2] = GetTime() - time;
+
+    // Server 2 compute
+    time = GetTime();
+    vec_ZZ_p u_2 = HomMVMult(2, ek2, para.pkePara, t_X_2, C_z, para.m, para.n);
+    vec_ZZ_p tau_2 = HomMVMult(2, ek2, para.pkePara, t_X_delta_2, C_z, para.m, para.n);
+
+    vec_ZZ g_tau_2;
+    g_tau_2.SetLength(para.m);
+    for (auto i = 0; i < para.m; i++){
+        u_2[i] = H_2[i] - 2 * u_2[i];
+        tau_2[i] = Eta_2[i] - 2 * tau_2[i];
+        PowerMod(g_tau_2[i], para.g, rep(tau_2[i]), para.r_);
+    }
+    Time[3] = GetTime() - time;
+
+    // Sending u and tau to the user
+    // User check
+    vec_ZZ_p k;
+    {
+
+        ZZ_pPush push(para.pkePara.r_context);
+        ZZ left, right, t_right;
+        right = 1;
+        ZZ_p sum_u;
+        for (auto i = 0; i < para.m; i++) {
+            sum_u += u_1[i] + u_2[i];
+            MulMod(t_right, g_tau_1[i], g_tau_2[i], para.r_);
+            MulMod(right, right, t_right, para.r_);
+        }
+        PowerMod(left, pvk, rep(sum_u), para.r_);
+
+        if (left != right) {
+//            std::cout << "Error when checking u" << std::endl;
+        }
+
+        // User compute kernel function
+        time = GetTime();
+        k.SetLength(para.m);
+        ZZ_p sum_z;
+        for (auto i = 0; i < para.n; i++) {
+            sum_z += z[i] * z[i];
+        }
+        for (auto i = 0; i < para.m; i++) {
+            k[i] = gamma * (u_1[i] + u_2[i] + sum_z);
+
+            //TODO: exp need rescale
+        }
+        Time[5] += GetTime() - time;
+    }
+    Ciphertext C_k;
+    auto hat_k = Encode(para.pkePara, k);
+    time = GetTime();
+    BKS_Enc(C_k, para.pkePara, pk, hat_k);
+    Time[5] += GetTime() - time;
+//    std::cout << "User compute time: " << Time[5] << std::endl;
+
+    // Sending C_k to servers
+    MemoryV t_kd_1, t_kd_2, t_y_1, t_y_2, t_phi_1, t_phi_2;
+    // Server 1 compute
+    time = GetTime();
+    BKS_Mult(t_kd_1, 1, ek1.bksEk, para.pkePara, t_d_1, C_k);
+    BKS_ADD1(t_y_1, 1, ek1.bksEk, t_kd_1, t_b_1);
+    BKS_Mult(t_phi_1, 1, ek1.bksEk, para.pkePara, t_y_1, ek1.C_delta);
+
+    vec_ZZ_p y_vec_1 = Decode(para.pkePara, BKS_Output(1, ek1.bksEk, t_y_1, para.pkePara));
+    vec_ZZ_p phi_vec_1 = Decode(para.pkePara, BKS_Output(1, ek1.bksEk, t_phi_1, para.pkePara));
+    {
+        ZZ_pPush push(para.pkePara.r_context);
+        for (auto i = 0; i < para.m; i++) {
+            y_1 += y_vec_1[i];
+            g_phi_1 += rep(phi_vec_1[i]);
+        }
+        PowerMod(g_phi_1, para.g, g_phi_1, para.r_);
+    }
+    Time[2] += GetTime() - time;
+//    std::cout << "Server 1 compute time: " << Time[2] << std::endl;
+
+    // Server 2 compute
+    time = GetTime();
+    BKS_Mult(t_kd_2, 2, ek2.bksEk, para.pkePara, t_d_2, C_k);
+    BKS_ADD1(t_y_2, 2, ek2.bksEk, t_kd_2, t_b_2);
+    BKS_Mult(t_phi_2, 2, ek2.bksEk, para.pkePara, t_y_2, ek2.C_delta);
+
+    vec_ZZ_p y_vec_2 = Decode(para.pkePara, BKS_Output(2, ek2.bksEk, t_y_2, para.pkePara));
+    vec_ZZ_p phi_vec_2 = Decode(para.pkePara, BKS_Output(2, ek2.bksEk, t_phi_2, para.pkePara));
+    {
+        ZZ_pPush push(para.pkePara.r_context);
+        for (auto i = 0; i < para.m; i++) {
+            y_2 += y_vec_2[i];
+            g_phi_2 += rep(phi_vec_2[i]);
+        }
+        PowerMod(g_phi_2, para.g, g_phi_2, para.r_);
+    }
+    Time[3] += GetTime() - time;
+}
+
+void Compute_improved(ZZ_p& y_1, ZZ_p& y_2, ZZ &g_phi_1, ZZ &g_phi_2, const EK &ek1, const EK &ek2, const PubPara &para,
+                        const Vec<Ciphertext> &C, const Ciphertext& C_d, const Ciphertext &C_b,
+                        const Ciphertext& C_gamma, const Ciphertext& C_c, const ZZ& p,// server inputs
+                        const PKE_PK& pk, const vec_ZZ_p& z,
+                        std::vector<double> &Time){
+    // Offline
+    Vec<MemoryV> t_gamma_X_1, t_gamma_X_2;
+    Vec<MemoryV> t_gamma_X_delta_1, t_gamma_X_delta_2;
+    MemoryV t_b_1, t_b_2, t_gamma_1, t_gamma_2, t_c_1, t_c_2, t_delta_b_1, t_delta_b_2, t_delta_c_1, t_delta_c_2;
+    t_gamma_X_1.SetLength(C.length());
+    t_gamma_X_delta_1.SetLength(C.length());
+    t_gamma_X_2.SetLength(C.length());
+    t_gamma_X_delta_2.SetLength(C.length());
+
+    // Server 1
+    auto time = GetTime();
+    BKS_Load(t_b_1, 1, ek1.bksEk, para.pkePara, C_b);
+    BKS_Load(t_gamma_1, 1, ek1.bksEk, para.pkePara, C_gamma);
+    BKS_Load(t_c_1, 1, ek1.bksEk, para.pkePara, C_c);
+    BKS_Mult(t_delta_b_1, 1, ek1.bksEk, para.pkePara, t_b_1, ek1.C_delta);
+    BKS_Mult(t_delta_c_1, 1, ek1.bksEk, para.pkePara, t_c_1, ek1.C_delta);
+    for (auto i = 0; i < C.length(); i++){
+        BKS_Mult(t_gamma_X_1[i], 1, ek1.bksEk, para.pkePara, t_gamma_1, C[i]);
+        BKS_Mult(t_gamma_X_delta_1[i], 1, ek1.bksEk, para.pkePara, t_gamma_X_1[i], ek1.C_delta);
+    }
+    Time[0] = GetTime() - time;
+    vec_ZZ_p c_1 = Decode(para.pkePara, BKS_Output(1, ek1.bksEk, t_c_1, para.pkePara));
+    vec_ZZ_p theta_1 = Decode(para.pkePara, BKS_Output(1, ek1.bksEk, t_delta_c_1, para.pkePara));
+
+    // Server 2
+    time = GetTime();
+    BKS_Load(t_b_2, 2, ek2.bksEk, para.pkePara, C_b);
+    BKS_Load(t_gamma_2, 2, ek2.bksEk, para.pkePara, C_gamma);
+    BKS_Load(t_c_2, 2, ek2.bksEk, para.pkePara, C_c);
+    BKS_Mult(t_delta_b_2, 2, ek2.bksEk, para.pkePara, t_b_2, ek2.C_delta);
+    BKS_Mult(t_delta_c_2, 2, ek2.bksEk, para.pkePara, t_c_2, ek2.C_delta);
+    for (auto i = 0; i < C.length(); i++){
+        BKS_Mult(t_gamma_X_2[i], 2, ek2.bksEk, para.pkePara, t_gamma_2, C[i]);
+        BKS_Mult(t_gamma_X_delta_2[i], 2, ek2.bksEk, para.pkePara, t_gamma_X_2[i], ek2.C_delta);
+    }
+    Time[1] = GetTime() - time;
+    vec_ZZ_p c_2 = Decode(para.pkePara, BKS_Output(2, ek2.bksEk, t_c_2, para.pkePara));
+    vec_ZZ_p theta_2 = Decode(para.pkePara, BKS_Output(2, ek2.bksEk, t_delta_c_2, para.pkePara));
+
+    // Online
+    // User input
+    vec_ZZ_p z_; // length N
+    for (auto i = 0 ; i < para.pkePara.N / z.length(); i++){
+        z_.append(z);
+    }
+    auto hat_z = Encode(para.pkePara, z_);
+    time = GetTime();
+    Ciphertext C_z;
+    BKS_Enc(C_z, para.pkePara, pk, hat_z);
+    Time[4] = GetTime() - time;
+
+    // Sending C_z to server
+
+    // Server 1 compute
+    time = GetTime();
+    vec_ZZ_p u_1 = HomMVMult(1, ek1, para.pkePara, t_gamma_X_1, C_z, para.m, para.n);
+    vec_ZZ_p tau_1 = HomMVMult(1, ek1, para.pkePara, t_gamma_X_delta_1, C_z, para.m, para.n);
+//    vec_ZZ g_tau_1;
+//    g_tau_1.SetLength(para.m);
+    {
+        ZZ_pPush push(para.pkePara.r_context);
+        for (auto i = 0; i < para.m; i++) {
+            u_1[i] = u_1[i] + c_1[0];
+            tau_1[i] = tau_1[i] + theta_1[0];
         }
     }
 
-    PVHSSPK pk;
-    PVHSSEK ek0, ek1;
-    PVHSSPVK pvk;
+    Ciphertext C_u_1, C_tau_1;
+    auto hat_u_1 = Encode(para.pkePara, u_1);
+    auto hat_tau_1 = Encode(para.pkePara, tau_1);
 
-    PVHSS_Gen(pk, ek0, ek1, pvk);
+    BKS_Enc(C_u_1, para.pkePara, pk, hat_u_1);
+    BKS_Enc(C_tau_1, para.pkePara, pk, hat_tau_1);
+    Time[2] = GetTime() - time;
+
+    // Server 2 compute
+    time = GetTime();
+    vec_ZZ_p u_2 = HomMVMult(2, ek2, para.pkePara, t_gamma_X_2, C_z, para.m, para.n);
+    vec_ZZ_p tau_2 = HomMVMult(2, ek2, para.pkePara, t_gamma_X_delta_2, C_z, para.m, para.n);
+
+    {
+        ZZ_pPush push(para.pkePara.r_context);
+        for (auto i = 0; i < para.m; i++) {
+            u_2[i] = u_2[i] + c_2[0];
+            tau_2[i] = tau_2[i] + theta_2[0];
+        }
+    }
+
+    Ciphertext C_u_2, C_tau_2;
+    auto hat_u_2 = Encode(para.pkePara, u_2);
+    auto hat_tau_2 = Encode(para.pkePara, tau_2);
+
+    BKS_Enc(C_u_2, para.pkePara, pk, hat_u_2);
+    BKS_Enc(C_tau_2, para.pkePara, pk, hat_tau_2);
+    Time[3] = GetTime() - time;
+
+    // Sending
+    Ciphertext C_u, C_tau;
+    BKS_ADD2(C_u, 1, ek1.bksEk, C_u_1, C_u_2);
+    BKS_ADD2(C_tau, 1, ek1.bksEk, C_tau_1, C_tau_2);
+
+    // Server 1
+    time = GetTime();
+    MemoryV t_u_1, t_u_tau_1;
+    BKS_Load(t_u_1, 1, ek1.bksEk, para.pkePara, C_u);
+    for (auto i = 1; i < p; i ++){
+        if (i == p-1){
+            BKS_Mult(t_u_tau_1, 1, ek1.bksEk, para.pkePara, t_u_1, C_tau);
+        }
+        BKS_Mult(t_u_1, 1, ek1.bksEk, para.pkePara, t_u_1, C_u);
+    }
+
+    MemoryV t_du_1, t_du_tau_1;
+    BKS_Mult(t_du_1, 1, ek1.bksEk, para.pkePara, t_u_1, C_d);
+    BKS_Mult(t_du_tau_1, 1, ek1.bksEk, para.pkePara, t_u_tau_1, C_d);
+
+    MemoryV t_y_1, t_phi_1;
+    BKS_ADD1(t_y_1, 1, ek1.bksEk, t_du_1, t_b_1);
+    BKS_Mult(t_phi_1, 1, ek1.bksEk, para.pkePara, t_y_1, ek1.C_delta);
+
+    vec_ZZ_p y_vec_1 = Decode(para.pkePara, BKS_Output(1, ek1.bksEk, t_y_1, para.pkePara));
+    vec_ZZ_p phi_vec_1 = Decode(para.pkePara, BKS_Output(1, ek1.bksEk, t_phi_1, para.pkePara));
+    {
+        ZZ_pPush push(para.pkePara.r_context);
+        for (auto i = 0; i < para.m; i++) {
+            y_1 += y_vec_1[i];
+            g_phi_1 += rep(phi_vec_1[i]);
+        }
+        PowerMod(g_phi_1, para.g, g_phi_1, para.r_);
+    }
+    Time[2] += GetTime() - time;
+
+    // Server 2
+    time = GetTime();
+    MemoryV t_u_2, t_u_tau_2;
+    BKS_Load(t_u_2, 2, ek2.bksEk, para.pkePara, C_u);
+    for (auto i = 1; i < p; i ++){
+        if (i == p-1){
+            BKS_Mult(t_u_tau_2, 2, ek2.bksEk, para.pkePara, t_u_2, C_tau);
+        }
+        BKS_Mult(t_u_2, 2, ek2.bksEk, para.pkePara, t_u_2, C_u);
+    }
+
+    MemoryV t_du_2, t_du_tau_2;
+    BKS_Mult(t_du_2, 2, ek2.bksEk, para.pkePara, t_u_2, C_d);
+    BKS_Mult(t_du_tau_2, 2, ek2.bksEk, para.pkePara, t_u_tau_2, C_d);
+
+    MemoryV t_y_2, t_phi_2;
+    BKS_ADD1(t_y_2, 2, ek2.bksEk, t_du_2, t_b_2);
+    BKS_Mult(t_phi_2, 2, ek2.bksEk, para.pkePara, t_y_2, ek2.C_delta);
+
+    vec_ZZ_p y_vec_2 = Decode(para.pkePara, BKS_Output(2, ek2.bksEk, t_y_2, para.pkePara));
+    vec_ZZ_p phi_vec_2 = Decode(para.pkePara, BKS_Output(2, ek2.bksEk, t_phi_2, para.pkePara));
+
+    {
+        ZZ_pPush push(para.pkePara.r_context);
+        for (auto i = 0; i < para.m; i++) {
+            y_2 += y_vec_2[i];
+            g_phi_2 += rep(phi_vec_2[i]);
+        }
+        PowerMod(g_phi_2, para.g, g_phi_2, para.r_);
+    }
+    Time[3] += GetTime() - time;
 }
-

@@ -1,46 +1,73 @@
 #pragma once
 
-#include "PVHSS.h"
+#include "BKS.h"
 
 typedef struct {
-    Vec<ZZ> alpha; // (y_j alpha_j) j \in SV
-    Vec<Vec<ZZ>> sv; // support vectors
-    ZZ b; // bias
+    vec_ZZ_p alpha; // (y_j alpha_j) j \in SV
+    Vec<vec_ZZ_p> X; // support vectors
+    ZZ_p b; // bias
 
-    // poly kernel
-    ZZ gamma;
-    ZZ c;
+    // kernel
+    ZZ_p gamma;
+    ZZ_p c;
+    ZZ p;
 
-    long SV; // num of support vectors
-    long features; // num of features
-    ZZ scale; // scale factor
+    vec_ZZ_pX hat_X; // encoded support vectors
+    ZZ_pX hat_alpha; // encoded alpha
+    ZZ_pX hat_b; // encoded bias
+    ZZ_pX hat_gamma; // encoded gamma
+    ZZ_pX hat_c; // encoded c
+
+    int m; // num of support vectors
+    int n; // num of features
+    int n_;
+    ZZ_p scale; // scale factor
 }ModelPara;
 
-void set_model_paras(ModelPara &modelPara, double gamma, double b, double c, std::string para_file);
-void get_user_inputs(Vec<Vec<ZZ>> &X, Vec<ZZ> &y, std::string in_file);
+typedef ZZ PVK;
 
-void poly_kernel(REG &reg, int b, PVHSSPK pk, PVHSSEK ek,
-                 Vec<ZZ> ct_x, ZZ ct_ccc, ZZ ct_3ccg,
-                 ZZ ct_3cgg, ZZ ct_ggg, Vec<ZZ> ct_z,
-                 int &prf_key, std::ofstream &bench_time);
+typedef struct {
+    BKS_EK bksEk;
+    Ciphertext C_delta;
+}EK;
 
-void predict(REG &reg, int b, PVHSSPK pk, PVHSSEK ek, int &prf_key,
-             Vec<Vec<ZZ>> ct_X, Vec<ZZ> ct_z, Vec<ZZ> ct_alpha,
-             ZZ ct_ccc, ZZ ct_3ccg, ZZ ct_3cgg, ZZ ct_ggg, ZZ ct_b);
+typedef struct {
+    PKE_Para pkePara;
+    ZZ g, r, r_;
+    int m; // num of support vectors
+    int n; // num of features
+}PubPara;
 
-void eval_svm(std::string in_file, std::string para_file, double gamma, double b, double c);
+vec_ZZ_p HomMVMult(int b, const EK &ek, const PKE_Para &pkePara, const Vec<MemoryV> &t_M, const Ciphertext &C_v, int m, int n);
 
-void dot_prod(REG &reg, int b, PVHSSPK pk, PVHSSEK ek, int &prf_key, Vec<ZZ> ct_x, Vec<ZZ> ct_z, std::ofstream &dot_prod_time);
+void SVM_Gen(PubPara &para, PKE_PK &pk, EK &ek1, EK &ek2, PVK &pvk);
 
-void squared_euclidean_distance(REG &reg, int b, PVHSSPK pk, PVHSSEK ek, int &prf_key, Vec<ZZ> ct_x, Vec<ZZ> ct_z, Vec<ZZ> ct_zz, std::ofstream &squared_euclidean_distance_time);
+void SVM_ModelEnc_basic(Vec<Ciphertext> &C, Ciphertext& C_d, Ciphertext &C_b,
+                        PubPara &para, const PKE_PK &pk, const ModelPara &modelPara);
 
+void SVM_ModelEnc_improved(Vec<Ciphertext> &C, Ciphertext &C_d, Ciphertext &C_b, Ciphertext &C_g, Ciphertext &C_c,
+                            PubPara &para, const PKE_PK &pk, const ModelPara &modelPara);
 
-void test_input_dp_time(std::string in_file, std::string type, int features);
+void Compute_basic_poly(ZZ_p &y_1, ZZ_p &y_2, ZZ &g_phi_1, ZZ &g_phi_2, const EK &ek1, const EK &ek2, const PubPara &para,
+                        const Vec<Ciphertext> &C, const Ciphertext &C_d, const Ciphertext &C_b, const ZZ_p &gamma,
+                        const ZZ_p &c, const ZZ &p, const PKE_PK &pk, const PVK &pvk, const vec_ZZ_p &z,
+                        std::vector<double> &Time);
 
-void test_input_sv_time(std::string para_file, std::string type, int features);
+void Compute_basic_rbf_offline(Vec<MemoryV> &t_X_1, Vec<MemoryV> &t_X_2, Vec<MemoryV> &t_X_delta_1, Vec<MemoryV> &t_X_delta_2,
+                                MemoryV &t_b_1, MemoryV &t_b_2, MemoryV &t_d_1, MemoryV &t_d_2,
+                                vec_ZZ_p &H_1, vec_ZZ_p &H_2, vec_ZZ_p &Eta_1, vec_ZZ_p &Eta_2,
+                                const EK &ek1, const EK &ek2, const PubPara &para,
+                                const Vec<Ciphertext> &C, const Ciphertext& C_d, const Ciphertext &C_b, const ZZ_p& gamma, // server inputs
+                                const PKE_PK& pk, const PVK& pvk, const vec_ZZ_p& z,
+                                std::vector<double> &Time);
 
-void test_batch_verify(int size);
+void Compute_basic_rbf(ZZ_p& y_1, ZZ_p& y_2, ZZ &g_phi_1, ZZ &g_phi_2, const EK &ek1, const EK &ek2, const PubPara &para,
+                        const Vec<Ciphertext> &C, const Ciphertext& C_d, const Ciphertext &C_b, const ZZ_p& gamma, // server inputs
+                        const PKE_PK& pk, const PVK& pvk, const vec_ZZ_p& z,
+                        std::vector<double> &Time);
 
-void test_verify(int size);
-
-void test_input_size();
+void Compute_improved(ZZ_p& y_1, ZZ_p& y_2, ZZ &g_phi_1, ZZ &g_phi_2, const EK &ek1, const EK &ek2, const PubPara &para,
+                        const Vec<Ciphertext> &C, const Ciphertext& C_d, const Ciphertext &C_b,
+                        const Ciphertext& C_gamma, const Ciphertext& C_c, const ZZ& p,// server inputs
+                        const PKE_PK& pk, const vec_ZZ_p& z,
+                        std::vector<double> &Time);

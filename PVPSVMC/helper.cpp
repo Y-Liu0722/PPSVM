@@ -1,6 +1,48 @@
 #include "helper.h"
 
-#include <utility>
+void Random_ZZ_pX(ZZ_pX &a, int N, int q_bit) {
+    ZZ_p coeff;
+    for (int i = 0; i < N; i++) {
+        conv(coeff, RandomBits_ZZ(q_bit));
+        SetCoeff(a, i, coeff);
+    }
+}
+
+void SecretKey(ZZ_pX &sk, int N, int hsk) {
+    int interval = 0;
+    interval = N / hsk;
+    int index = rand() % interval;
+    for (int i = 0; i < hsk; i++) {
+        SetCoeff(sk, index, 1);
+        index = index + rand() % interval;
+    }
+
+}
+
+void GaussRand(ZZ_pX &e, int N) {
+    double res_standard;
+    int deviation = 8;
+    int res;
+    for (int i = 0; i < N; i++) {
+        res_standard = sqrt(-2.0 * log(rand() / (RAND_MAX + 1.0))) * sin(2.0 * PI * rand() / (RAND_MAX + 1.0));
+        res = res_standard * deviation;
+        SetCoeff(e, i, res);
+    }
+}
+
+Vec<vec_ZZ_p> GenRandomMatrix(int m, int n, const ZZ& r){
+    ZZ_p::init(r);
+    Vec<vec_ZZ_p> M;
+    M.SetLength(m);
+    for (int i = 0; i < m; i++){
+        M[i].SetLength(n);
+        for (int j = 0; j < n; j++){
+            M[i][j] = random_ZZ_p();
+        }
+    }
+
+    return M;
+}
 
 void DataProcess(double &mean, double &stdev, double *Time, int cyctimes)
 {
@@ -75,14 +117,14 @@ void data_preprocess(vector<std::vector<double>> &f_data, std::vector<std::vecto
     }
 }
 
-void f_data2ZZ(Vec<Vec<ZZ>> &data, vector<std::vector<double>> f_data, double scale){
+void f_data2ZZ_p(Vec<vec_ZZ_p> &data, const vector<std::vector<double>>& f_data, double scale){
     for (const auto& r: f_data){
-        Vec<ZZ> rows;
+        vec_ZZ_p rows;
         for (const auto& cell: r){
 //            std::cout << cell << " ";
             auto tmp = cell * scale;
             auto int_value = static_cast<long long>(std::round(tmp));
-            rows.append(ZZ(int_value));
+            rows.append(ZZ_p(int_value));
         }
 //        std::cout << std::endl;
 //        std::cout << rows << std::endl;
@@ -99,16 +141,5 @@ void bigEndianToHexString(uint8_t *data, size_t length, char *hexString) {
 void hexStringToBigEndian(const char *hexString, uint8_t *data, size_t length) {
     for (size_t i = 0; i < length; i++) {
         sscanf(hexString + i * 2, "%2hhX", &data[i]);
-    }
-}
-
-void FastPowerMod(ZZ &res, ZZ a, ZZ b, ZZ m){
-    res = ZZ(1);
-    while (b > 0){
-        if (b % 2 == 1){
-            MulMod(res, res, a, m);
-        }
-        MulMod(a, a, a, m);
-        b = b / 2;
     }
 }

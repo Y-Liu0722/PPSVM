@@ -1,3 +1,4 @@
+#include <numeric>
 #include "SDPC.h"
 #include "SSEDC.h"
 
@@ -7,7 +8,18 @@ void test_batch_verify(int size);
 
 int main(){
 
+//    test_dc_input(64);
+//    test_dc_input(128);
+//    test_dc_input(256);
+//    test_dc_input(512);
+//    test_dc_input(1024);
 
+
+//    test_sed_input(64);
+//    test_sed_input(128);
+//    test_sed_input(256);
+//    test_sed_input(512);
+//    test_sed_input(1024);
 
     return 0;
 }
@@ -29,9 +41,15 @@ void test_sed_input(int features){
     set_model_paras(modelPara, 0.005, -1.4690208, 2, "../data/SMS_para_rbf_"+ std::to_string(features) +".csv");
 
     get_user_inputs(X, y, "../data/SMS_test_data_rbf_"+ std::to_string(features)+".csv", size);
-    std::ofstream fgen_time("../benchmark/fgen_sed_time_"+ std::to_string(features)+".txt");
-    std::ofstream sgen_time("../benchmark/sgen_sed_time_"+ std::to_string(features)+".txt");
-    std::ofstream compute_time("../benchmark/compute_sed_time_"+ std::to_string(features)+".txt");
+
+
+    auto **ct_W1 = new BGN_CT *[modelPara.SV];
+    auto **ct_W2 = new BGN_CT *[modelPara.SV];
+    for (int k = 0; k < modelPara.SV; k++) {
+        ct_W1[k] = new BGN_CT[modelPara.features];
+        ct_W2[k] = new BGN_CT[modelPara.features];
+        SSEDC_FGen(ct_W1[k], ct_W2[k], modelPara.sv[k], pk, modelPara.features);
+    }
 
 //    for (auto k = 0; k < size; k++){
 //        int n = 3; // 3 server
@@ -58,15 +76,9 @@ void test_sed_input(int features){
 //        time = GetTime() - time;
 //        sgen_time << time * 1000 << std::endl;
 //    }
-
-    for (int k = 0; k < modelPara.SV; k++){
-        auto *ct_W1 = new BGN_CT[modelPara.features];
-        auto *ct_W2 = new BGN_CT[modelPara.features];
-        auto time = GetTime();
-        SSEDC_FGen(ct_W1, ct_W2, modelPara.sv[k], pk, modelPara.features);
-        time = GetTime() - time;
-        fgen_time << time * 1000 << std::endl;
-
+    std::vector<double> user_enc_time;
+    std::vector<double> server_compute_time;
+    for (int in = 0; in < 10; in++){
         int n = 3; // 3 server
         int t = 1; // 1 collude most
 
@@ -86,10 +98,10 @@ void test_sed_input(int features){
         g1_t pvk;
         g1_new(pvk);
 
-        time = GetTime();
-        SSEDC_SGen(shares, index, pvk, X[0], pk, n, t, modelPara.features);
+        auto time = GetTime();
+        SSEDC_SGen(shares, index, pvk, X[in], pk, n, t, modelPara.features);
         time = GetTime() - time;
-        sgen_time << time * 1000 << std::endl;
+        user_enc_time.push_back(time);
 
         // shares_rev[i] sends to server i
         auto shares_rev = new bn_t*[n];
@@ -101,19 +113,37 @@ void test_sed_input(int features){
                 bn_copy(shares_rev[i][j], shares[j][i]);
             }
         }
-
-        auto* V = new BGN_CT[n];
-        auto* O = new BGN_CT[n];
-        std::cout << "***************** SV: " << k << " *****************" << std::endl;
-        for (int i = 0; i < n; i ++){
-            auto time = GetTime();
-            SSEDC_Compute(V[i], O[i], pk, shares_rev[i], ct_W1, ct_W2, i, modelPara.features);
-            time = GetTime() - time;
-            compute_time << time * 1000 << std::endl;
-            std::cout <<"Server " << i << ": Online computing time " << time * 1000 << " ms" << std::endl;
+        time = GetTime();
+        for (int k = 0; k < modelPara.SV; k++){
+            auto* V = new BGN_CT[n];
+            auto* O = new BGN_CT[n];
+//            std::cout << "***************** SV: " << k << " *****************" << std::endl;
+            for (int i = 0; i < n; i ++){
+                SSEDC_Compute(V[i], O[i], pk, shares_rev[i], ct_W1[k], ct_W2[k], i, modelPara.features);
+            }
         }
+        time = GetTime() - time;
+        server_compute_time.push_back(time);
     }
+
+    // average time
+    double mean, stdev;
+    // mean of user encryption time
+    mean = std::accumulate(user_enc_time.begin(), user_enc_time.end(), 0.0) / user_enc_time.size();
+    // stdev of user encryption time
+    stdev = std::sqrt(std::inner_product(user_enc_time.begin(), user_enc_time.end(), user_enc_time.begin(), 0.0) / user_enc_time.size() - mean * mean);
+    std::cout << "Feature:" << features << std::endl;
+    std::cout << "Mean of user encryption time: " << mean*1000 << "ms" << std::endl;
+    std::cout << "Standard deviation of user encryption time: " << stdev << std::endl;
+
+    // mean of server computing time
+    mean = std::accumulate(server_compute_time.begin(), server_compute_time.end(), 0.0) / server_compute_time.size();
+    // stdev of server computing time
+    stdev = std::sqrt(std::inner_product(server_compute_time.begin(), server_compute_time.end(), server_compute_time.begin(), 0.0) / server_compute_time.size() - mean * mean);
+    std::cout << "Mean of server computing time: " << mean*1000 << "ms" << std::endl;
+    std::cout << "Standard deviation of server computing time: " << stdev << std::endl;
 }
+
 
 void test_dc_input(int features){
     BGN_PK pk;
@@ -134,10 +164,9 @@ void test_dc_input(int features){
 
 
     get_user_inputs(X, y, "../data/SMS_test_data_"+ std::to_string(features)+".csv", size);
-    std::ofstream fgen_time("../benchmark/fgen_dc_time_"+ std::to_string(features)+".txt");
-    std::ofstream sgen_time("../benchmark/sgen_dc_time_"+ std::to_string(features)+".txt");
-    std::ofstream compute_time("../benchmark/compute_dc_time_"+ std::to_string(features)+".txt");
-//
+
+
+
 //    for (auto k = 0; k < size; k++){
 //        int n = 3; // 3 server
 //        int t = 1; // 1 collude most
@@ -161,16 +190,86 @@ void test_dc_input(int features){
 //        auto time = GetTime();
 //        SSEDC_SGen(shares, index, pvk, X[k], pk, n, t, modelPara.features);
 //        time = GetTime() - time;
-//        sgen_time << time * 1000 << std::endl;
 //    }
 
+    auto **ct_W = new BGN_CT *[modelPara.SV];
+    for (int k = 0; k < modelPara.SV; k++) {
+        ct_W[k] = new BGN_CT[modelPara.features];
+        SDPC_FGen(ct_W[k], modelPara.sv[k], pk, modelPara.features);
+    }
 
-    for (int k = 0; k < modelPara.SV; k++){
+    std::vector<double> user_enc_time;
+    std::vector<double> server_compute_time;
+    for (int in = 0; in < 10; in++){
+        int n = 3; // 3 server
+        int t = 1; // 1 collude most
+
+        auto shares = new bn_t*[modelPara.features + 1];
+        for (int i = 0; i < modelPara.features + 1; i++){
+            shares[i] = new bn_t[n];
+            for (int j = 0; j < n; j++){
+                bn_null(shares[i][j]);
+                bn_new(shares[i][j]);
+            }
+        }
+        bn_t *index = new bn_t[n];
+        for (int i = 0; i < n; i++){
+            bn_null(index[i]);
+            bn_new(index[i]);
+        }
+        g1_t pvk;
+        g1_new(pvk);
+
+        auto time = GetTime();
+        SDPC_SGen(shares, index, pvk, X[in], pk, n, t, modelPara.features);
+        time = GetTime() - time;
+        user_enc_time.push_back(time);
+
+        // shares_rev[i] sends to server i
+        auto shares_rev = new bn_t*[n];
+        for (int i = 0; i < n; i++){
+            shares_rev[i] = new bn_t[modelPara.features + 1];
+            for (int j = 0; j < modelPara.features + 1; j++){
+                bn_null(shares_rev[i][j]);
+                bn_new(shares_rev[i][j]);
+                bn_copy(shares_rev[i][j], shares[j][i]);
+            }
+        }
+        time = GetTime();
+        for (int k = 0; k < modelPara.SV; k++){
+            auto* V = new BGN_CT[n];
+            auto* O = new BGN_CT[n];
+//            std::cout << "***************** SV: " << k << " *****************" << std::endl;
+            for (int i = 0; i < n; i ++){
+                SDPC_Compute(V[i], O[i], shares_rev[i], ct_W[k], i, modelPara.features);
+            }
+        }
+        time = GetTime() - time;
+        server_compute_time.push_back(time);
+    }
+
+    // average time
+    double mean, stdev;
+    // mean of user encryption time
+    mean = std::accumulate(user_enc_time.begin(), user_enc_time.end(), 0.0) / user_enc_time.size();
+    // stdev of user encryption time
+    stdev = std::sqrt(std::inner_product(user_enc_time.begin(), user_enc_time.end(), user_enc_time.begin(), 0.0) / user_enc_time.size() - mean * mean);
+    std::cout << "Feature:" << features << std::endl;
+    std::cout << "Mean of user encryption time: " << mean*1000 << "ms" << std::endl;
+    std::cout << "Standard deviation of user encryption time: " << stdev << std::endl;
+
+    // mean of server computing time
+    mean = std::accumulate(server_compute_time.begin(), server_compute_time.end(), 0.0) / server_compute_time.size();
+    // stdev of server computing time
+    stdev = std::sqrt(std::inner_product(server_compute_time.begin(), server_compute_time.end(), server_compute_time.begin(), 0.0) / server_compute_time.size() - mean * mean);
+    std::cout << "Mean of server computing time: " << mean*1000 << "ms" << std::endl;
+    std::cout << "Standard deviation of server computing time: " << stdev << std::endl;
+
+/*    for (int k = 0; k < modelPara.SV; k++){
         auto *ct_W = new BGN_CT[modelPara.features];
         auto time = GetTime();
         SDPC_FGen(ct_W, modelPara.sv[k], pk, modelPara.features);
         time = GetTime() - time;
-        fgen_time << time * 1000 << std::endl;
 
         int n = 3; // 3 server
         int t = 1; // 1 collude most
@@ -194,7 +293,6 @@ void test_dc_input(int features){
         time = GetTime();
         SDPC_SGen(shares, index, pvk, X[0], pk, n, t, modelPara.features);
         time = GetTime() - time;
-        sgen_time << time * 1000 << std::endl;
 
         // shares_rev[i] sends to server i
         auto shares_rev = new bn_t*[n];
@@ -214,10 +312,9 @@ void test_dc_input(int features){
             auto time = GetTime();
             SDPC_Compute(V[i], O[i], shares_rev[i], ct_W, i, modelPara.features);
             time = GetTime() - time;
-            compute_time << time * 1000 << std::endl;
             std::cout <<"Server " << i << ": Online computing time " << time * 1000 << " ms" << std::endl;
         }
-    }
+    }*/
 }
 
 void test_batch_verify(int size){
