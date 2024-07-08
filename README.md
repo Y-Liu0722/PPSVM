@@ -1,7 +1,7 @@
 # Introduction
-This codebase is part of the PVPSVMC-PVHSS paper.
+This codebase is part of the PPSVM paper.
 
-**What this codebase includes**: example and benchmark implementations in C++14 for some of the schemes in the PVPSVMC-PVHSS paper.
+**What this codebase includes**: example and benchmark implementations in C++17 for some of the schemes in the PPSVM paper.
 
 **What this codebase is not**: it is not for production use; it is not extensively tested.
 
