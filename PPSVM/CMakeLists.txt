@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.0.0)
-project(PVPSVMC VERSION 0.1.0)
+project(PPSVM VERSION 0.1.0)
 
 include(CTest)
 enable_testing()
@@ -11,7 +11,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 include_directories(/usr/local/include)
 link_directories(/usr/local/lib)
 
-add_executable(PVPSVMC
+add_executable(PPSVM
         main.cpp
         helper.cpp
         helper.h
@@ -24,7 +24,7 @@ add_executable(PVPSVMC
         bench.cpp
         bench.h)
 
-target_link_libraries(PVPSVMC ntl m gmp pthread relic helib)
+target_link_libraries(PPSVM ntl m gmp pthread relic helib)
 
 set(CPACK_PROJECT_NAME ${PROJECT_NAME})
 set(CPACK_PROJECT_VERSION ${PROJECT_VERSION})
