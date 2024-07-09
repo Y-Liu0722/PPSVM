@@ -652,3 +652,17 @@ void Compute_improved(ZZ_p& y_1, ZZ_p& y_2, ZZ &g_phi_1, ZZ &g_phi_2, const EK &
     }
     Time[3] += GetTime() - time;
 }
+
+bool Verify(ZZ_p &y, const ZZ_p& y_1, const ZZ_p& y_2, const ZZ &g_phi_1, const ZZ &g_phi_2, const PVK& pvk, const PubPara &para){
+    ZZ_pPush push(para.pkePara.r_context);
+    y = y_1 + y_2;
+
+    ZZ left, right;
+    PowerMod(left, pvk, rep(y), para.r_);
+    MulMod(right, g_phi_1, g_phi_2, para.r_);
+
+    if (left != right){
+        return false;
+    }
+    return true;
+}

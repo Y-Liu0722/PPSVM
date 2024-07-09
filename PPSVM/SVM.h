@@ -71,3 +71,5 @@ void Compute_improved(ZZ_p& y_1, ZZ_p& y_2, ZZ &g_phi_1, ZZ &g_phi_2, const EK &
                         const Ciphertext& C_gamma, const Ciphertext& C_c, const ZZ& p,// server inputs
                         const PKE_PK& pk, const vec_ZZ_p& z,
                         std::vector<double> &Time);
+
+bool Verify(ZZ_p &y, const ZZ_p& y_1, const ZZ_p& y_2, const ZZ &g_phi_1, const ZZ &g_phi_2, const PVK& pvk, const PubPara &para);
