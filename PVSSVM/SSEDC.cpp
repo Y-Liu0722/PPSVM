@@ -1,7 +1,3 @@
-//
-// Created by ly on 24-3-28.
-//
-
 #include "SSEDC.h"
 
 void SSEDC_KeyGen(BGN_PK &pk, BGN_SK &sk) {

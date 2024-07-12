@@ -1,6 +1,3 @@
-//
-// Created by ly on 24-2-22.
-//
 
 #include "SDPC.h"
 
