@@ -249,7 +249,7 @@ void bench_ModelEnc(int features){
 
     std::vector<double> Time;
     double time;
-    for (auto i = 0; i < 5; i++){
+    for (auto i = 0; i < 100; i++){
         time = GetTime();
         SVM_ModelEnc_basic(C, C_d, C_b, para, pk, modelPara);
         time = GetTime() - time;
@@ -315,7 +315,7 @@ void bench_ModelEnc_improved(int features) {
 
     std::vector<double> Time;
     double time;
-    for (auto i = 0; i < 5; i++){
+    for (auto i = 0; i < 100; i++){
         time = GetTime();
         SVM_ModelEnc_improved(C, C_d, C_b, C_g, C_c, para, pk, modelPara);
         time = GetTime() - time;
@@ -385,7 +385,7 @@ void bench_compute_basic_poly(int features){
 
     ZZ_p y_1, y_2;
     ZZ g_phi_1, g_phi_2;
-    for (auto i = 0; i < 10; i ++){
+    for (auto i = 0; i < 100; i ++){
         // 0 time offline for server 1
         // 1 time offline for server 2
         // 2 time online for server 1
@@ -500,7 +500,7 @@ void bench_compute_basic_rbf(int features){
 
     ZZ_p y_1, y_2;
     ZZ g_phi_1, g_phi_2;
-    for (auto i = 0; i < 5; i ++){
+    for (auto i = 0; i < 100; i ++){
         // 0 time offline for server 1
         // 1 time offline for server 2
         // 2 time online for server 1
@@ -619,7 +619,7 @@ void bench_compute_improved(int features){
 
     ZZ_p y_1, y_2;
     ZZ g_phi_1, g_phi_2;
-    for (auto i = 0; i < 2; i ++){
+    for (auto i = 0; i < 100; i ++){
         // 0 time offline for server 1
         // 1 time offline for server 2
         // 2 time online for server 1
